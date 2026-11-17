@@ -4025,20 +4025,26 @@ const canvasBlob = (cv, type = 'image/png', q) => new Promise(res => cv.toBlob(r
 const safeTitle = () => (doc && doc.title || '作品').replace(/\s+/g, '_').slice(0, 40);
 function blobToB64(blob) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(blob); }); }
 
+// 動画のサイズ（7.1）：書き出し画面の「動画」の中でだけ選ぶ。前に選んだものを覚える。何も選ばなければ今までと同じ 1280×720
+const VSIZES = { std: [1280, 720, '横（ふつう）'], hd: [1920, 1080, '横（高画質）'], tall: [1080, 1920, '縦（リール用）'] };
+const vsizeGet = () => { try { const v = localStorage.getItem('fs7.vsize'); return VSIZES[v] ? v : 'std'; } catch (e) { return 'std'; } };
+const vsizeOf = (size, hd) => VSIZES[VSIZES[size] ? size : (hd ? 'hd' : 'std')];
+
 function openExport() {
   if (!doc) return;
   if (ui.playing) Play.stop();
-  let close = null, vmode = view3d.on ? '3d' : '2d';
+  let close = null, vmode = view3d.on ? '3d' : '2d', vsize = vsizeGet();
   const card = (icon, title, desc, run, extra) => h('div', { class: 'excard' },
     h('span', { class: 'exi', html: ic(icon) }),
     h('div', { class: 'ext' }, h('b', null, title), h('div', { class: 'hint' }, desc), extra || null),
     h('button', { class: 'gb sm y', onclick: run }, '書き出す'));
   const vseg = h('div', { class: 'seg', style: { marginTop: '8px' } }, ...[['2d', '上から（2D）'], ['3d', '3D・照明つき']].map(([v, l]) => h('button', { class: v === vmode ? 'on' : '', onclick: e => { vmode = v; [...e.currentTarget.parentNode.children].forEach(x => x.classList.toggle('on', x === e.currentTarget)); } }, l)));
+  const sseg = h('div', { class: 'seg', 'data-vsize': '', style: { marginTop: '6px' } }, ...Object.keys(VSIZES).map(v => h('button', { class: v === vsize ? 'on' : '', 'data-v': v, onclick: e => { vsize = v; try { localStorage.setItem('fs7.vsize', v); } catch (e2) { } [...e.currentTarget.parentNode.children].forEach(x => x.classList.toggle('on', x === e.currentTarget)); } }, VSIZES[v][2])));
   const optAudio = doc.audio && Aud.url ? h('label', null, h('input', { type: 'checkbox', id: 'exAudio' }), '曲のファイルも入れる') : null;
   const body = h('div', null,
     card('image', '画像', 'いまの隊形を1枚の画像に。', () => { close(); exportPng(true, true); }),
     card('sheet', '一覧シート', `全${doc.forms.length}隊形を1枚に並べた画像。配る用に。`, () => { close(); exportSheet(true, true); }),
-    card('film', '動画', `${fmtT(totalTime(), 0)}・曲つき。書き出しには同じ時間がかかります。`, () => { const m = vmode; close(); m === '3d' ? exportVideo3D({ cam: view3d.preset || 'front' }) : exportVideo({}); }, vseg),
+    card('film', '動画', `${fmtT(totalTime(), 0)}・曲つき。書き出しには同じ時間がかかります。`, () => { const m = vmode, s = vsize; close(); m === '3d' ? exportVideo3D({ cam: view3d.preset || 'front', size: s }) : exportVideo({ size: s }); }, h('div', null, vseg, sseg)),
     card('save', '作品ファイル', 'バックアップや、ほかの端末へ渡す用（.json）。', () => { const a = !!(byId('exAudio') && byId('exAudio').checked); close(); exportProjects([doc.id], a); }, optAudio),
     card('note', 'Muse 用の説明書', 'Muse に JSON を書いてもらうための説明書（.md）。', () => { close(); museSaveGuide(); }));
   modal({ title: '書き出し', icon: 'download', body, buttons: [], onOpen: (m, done) => close = () => done(null) });
@@ -4089,7 +4095,7 @@ async function exportSheet(names = true, arrows = true) {
 }
 function drawVideoFrame(ctx, W, Hh, t, names, v) {
   ctx.fillStyle = '#14171c'; ctx.fillRect(0, 0, W, Hh);
-  const L = locate(t), f = doc.forms[L.i], c = countAt(t), k = W / 1280;
+  const L = locate(t), f = doc.forms[L.i], c = countAt(t), k = Math.min(W, Hh) / 720;   // 文字の大きさ：横は今までと同じ、縦でも読める大きさ
   ctx.fillStyle = '#111d33'; ctx.fillRect(0, 0, W, 62 * k); ctx.fillStyle = '#ffd43f'; ctx.fillRect(0, 62 * k, W, 3 * k);
   ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.font = `900 ${24 * k}px ${FONT}`; ctx.fillStyle = '#fff';
   ctx.fillText(L.phase === 'trans' ? `${L.i}→${L.i + 1}  ${doc.forms[L.i - 1].name} → ${f.name}` : `${L.i + 1}. ${f.name}`, 24 * k, 32 * k, W * 0.55);
@@ -4164,14 +4170,14 @@ async function recordVideo({ W, Hh, title, draw, filename, before, after }) {
   const type = (mime || 'video/webm').split(';')[0], ext = type.includes('mp4') ? 'mp4' : 'webm';
   await saveFile(`${filename}.${ext}`, new Blob(chunks, { type }));
 }
-async function exportVideo({ hd = false, names = true } = {}) {
-  const W = hd ? 1920 : 1280, Hh = hd ? 1080 : 720;
-  const v = fitView(doc, W, Hh, { l: 70 * W / 1280, r: 40 * W / 1280, t: 90 * W / 1280, b: 76 * W / 1280 });
-  await recordVideo({ W, Hh, filename: safeTitle(), draw: (ctx, t) => drawVideoFrame(ctx, W, Hh, t, names, v) });
+async function exportVideo({ hd = false, size = '', names = true } = {}) {
+  const [W, Hh] = vsizeOf(size, hd), k = Math.min(W, Hh) / 720, tall = Hh > W;
+  const v = fitView(doc, W, Hh, { l: 70 * k, r: 40 * k, t: 90 * k, b: 76 * k });
+  await recordVideo({ W, Hh, filename: safeTitle() + (tall ? '_縦' : ''), draw: (ctx, t) => drawVideoFrame(ctx, W, Hh, t, names, v) });
 }
 // 3D動画（照明つき）
-async function exportVideo3D({ hd = false, cam = 'front', info = true } = {}) {
-  const W = hd ? 1920 : 1280, Hh = hd ? 1080 : 720, k = W / 1280;
+async function exportVideo3D({ hd = false, size = '', cam = 'front', info = true } = {}) {
+  const [W, Hh] = vsizeOf(size, hd), k = Math.min(W, Hh) / 720, tall = Hh > W;
   const was = view3d.on, prevPreset = view3d.preset, prevOrbit = Object.assign({}, view3d.orbit);
   if (!was) { const ok = await view3d.open({ offscreen: true }); if (!ok) return; }
   const overlay = (ctx, t) => {
@@ -4184,8 +4190,9 @@ async function exportVideo3D({ hd = false, cam = 'front', info = true } = {}) {
     ctx.textAlign = 'right'; ctx.font = `500 ${24 * k}px ${NUMFONT}`; ctx.fillStyle = '#f4b860'; ctx.fillText(fmtT(t, 1) + (c ? `   ${c.eight}-${c.count}` : ''), W - 24 * k, 32 * k);
   };
   await recordVideo({
-    W, Hh, title: '3D動画を書き出し中', filename: safeTitle() + '_3D',
-    before: () => { view3d.exporting = true; view3d.applyPreset(cam); },
+    W, Hh, title: '3D動画を書き出し中', filename: safeTitle() + '_3D' + (tall ? '_縦' : ''),
+    // 縦：横と同じ幅が画面に入るように、カメラを後ろへ引く（舞台の左右が切れないように）
+    before: () => { view3d.exporting = true; view3d.applyPreset(cam); if (tall) view3d.orbit.dist = Math.min(90, view3d.orbit.dist * (16 / 9) / (W / Hh)); },
     draw: (ctx, t) => { const gl = view3d.renderFrame(t, W, Hh); ctx.drawImage(gl, 0, 0, W, Hh); overlay(ctx, t); },
     after: () => { view3d.exporting = false; if (!was) view3d.close(); else { view3d.preset = prevPreset; Object.assign(view3d.orbit, prevOrbit); view3d.r.setPixelRatio(Math.min(view3d.lite ? 1.25 : 1.75, devicePixelRatio || 1)); view3d.resize(); } }
   });
@@ -4577,7 +4584,7 @@ const view3d = {
   },
   // 書き出し用：指定の大きさで1コマ描いてキャンバスを返す
   renderFrame(t, W, Hh) {
-    if (this.r.getSize(new this.T.Vector2()).x !== W) { this.r.setPixelRatio(1); this.r.setSize(W, Hh, false); this.cam.aspect = W / Hh; this.cam.updateProjectionMatrix(); }
+    const cur = this.r.getSize(new this.T.Vector2()); if (cur.x !== W || cur.y !== Hh) { this.r.setPixelRatio(1); this.r.setSize(W, Hh, false); this.cam.aspect = W / Hh; this.cam.updateProjectionMatrix(); }
     this.render(t); return this.r.domElement;
   },
   kick() { markDirty(); }
